@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <string>
 #include <sys/poll.h>
 #include <sys/types.h>
 #include <poll.h>
@@ -18,13 +19,14 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
-#include <utility>
+#include <vector>
 
 // personal headers
-#include "data_structures.h"
+#include "utilities.h"
 
 const uint16_t port = 34900;
 const int backlog = 64;
+g_data g_data = {}; // initialize the hmap
 
 // utility functions
 void die(std::string message) {
@@ -144,22 +146,83 @@ void handle_write(std::unique_ptr<Con>& con) {
 	}
 }
 
-static void do_request(response& rep, std::vector<std::string>& commands) {
+static void do_get(std::vector<std::string> &cmds, response &rep) {
+	Entry key;
+	key.key.swap(cmds[1]);
+
+	// set the hcode for this key
+	key.node.hcode = str_hash((uint8_t*) key.key.data(), key.key.size());
+	HNode *hnode = hmap_lookup(&g_data.db, &key.node, &entry_eq);  
+
+	msg("something after the search");
+	if (!hnode) {
+		rep.status = RESPONSE_NX; // no key found
+		return;
+	}
+
+	Entry *result = container_of(hnode, Entry, node);
+	const std::string val = result->val;
+
+	assert(val.size() < k_max_msg);
+	rep.data.assign(val.begin(), val.end());
+}
+
+static void do_set(std::vector<std::string>& cmds, response &rep) {
+	// we have to search for the key
+	// if it exists, we update it
+	// otherwise we add a new entry into the hashmap
+	
+	Entry lookup;
+	lookup.key.swap(cmds[1]);
+	lookup.node.hcode = str_hash((uint8_t*) lookup.key.data(), lookup.key.size());
+	HNode *hnode = hmap_lookup(&g_data.db, &lookup.node, &entry_eq);
+	
+	// no such entry exists
+	if (!hnode) {
+		msg("didn't find the key");
+		Entry *new_entry = new Entry();
+		new_entry->key.swap(lookup.key);
+		new_entry->val.swap(cmds[2]);
+		new_entry->node.hcode = lookup.node.hcode; 
+		hmap_insert(&g_data.db, &new_entry->node);
+		rep.status = RESPONSE_OK;
+		return;
+	}
+	
+	Entry *result = container_of(hnode, Entry, node);
+	result->val.swap(cmds[2]);
+	rep.status = RESPONSE_OK;
+}
+
+static void do_delete(std::vector<std::string> &cmds, response &rep) {
+	// search the key
+	Entry key;
+	key.key.swap(cmds[1]);
+	key.node.hcode = str_hash((uint8_t*)key.key.data(), key.key.size());
+
+	HNode *hnode = hmap_lookup(&g_data.db, &key.node, entry_eq);
+	if (!hnode) {
+		rep.status = RESPONSE_NX;
+		return;
+	}
+
+	Entry *value = container_of(hnode, Entry, node);
+	rep.data.assign(value->val.begin(), value->val.end());
+	rep.status = RESPONSE_OK;
+
+	hmap_deletion(&g_data.db, hnode, entry_eq); 
+}
+
+static void do_request(response &rep, std::vector<std::string> &commands) {
 	if (commands.size() == 2 && commands[0] == "get")	{
 		msg("case get");
-		auto it = g_data.find(commands[1]);
-		if (it == g_data.end()) {
-			rep.status = RESPONSE_NX;	
-			return;
-		}
-		const std::string val = it->second;
-		rep.data.assign(val.begin(), val.end());
+		do_get(commands, rep);
 	} else if (commands.size() == 3 && commands[0] == "set") {
 			msg("case set");
-			g_data[commands[1]].swap(commands[2]);
+			do_set(commands, rep);
 	} else if (commands.size() == 2 && commands[0] == "del") {
 			msg("case del");
-			g_data.erase(commands[1]);
+			do_delete(commands, rep);
 	} else {
 		rep.status = RESPONSE_ERR;
 	}
