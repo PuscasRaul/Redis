@@ -17,7 +17,7 @@ typedef bool (*htable_keq)(const void *k1, const void *k2);
 
 struct HNode {
 	HNode* next;
-	uint64_t hcode = 0;
+	uint32_t hcode = 0;
 };
 
 struct HTab {

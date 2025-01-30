@@ -40,6 +40,6 @@ struct Entry {
 	std::string val;
 };
 
-uint64_t str_hash(const uint8_t *data, size_t len);
+uint32_t str_hash(const uint8_t *data, size_t len);
 bool entry_eq(HNode *lhs, HNode *rhs); 
 
