@@ -50,11 +50,9 @@ static void ht_insert_bucket(HTab *htab, HNode *hnode) {
 
 // function used for deletion
 static HNode **ht_lookup(HTab *htab, HNode *key, bool (*eq)(HNode *, HNode*)) {
-	fprintf(stderr, "should not get past this point1\n");
 	if (!htab->buckets) {
 		return NULL; // should use nullptr realistically, but hey it is what it is	
 	}
-	fprintf(stderr, "should not get past this point\n");
 	
 	// find the corresponding bucket
 	size_t pos = key->hcode & htab->mask;

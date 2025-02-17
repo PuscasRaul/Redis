@@ -1,5 +1,6 @@
 // c/system
 #include <arpa/inet.h>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <netinet/in.h>
@@ -24,48 +25,11 @@
 // personal headers
 #include "utilities.h"
 
+using Buffer =std::vector<uint8_t>;
+
 const uint16_t port = 34900;
 const int backlog = 64;
 g_data g_data = {}; // initialize the hmap
-
-// utility functions
-void die(std::string message) {
-	std::cerr<<message<<"\n";
-	abort();
-}
-
-void msg(std::string message) {
-	std::cerr<<message<<" "<<std::strerror(errno)<<"\n";
-}
-
-static void buf_append(std::vector<uint8_t>& buf, const uint8_t *data, size_t size) {
-	buf.insert(buf.end(), data, data + size);
-}
-
-static void buf_consume(std::vector<uint8_t>& buf, size_t size) {
-	buf.erase(buf.begin(), buf.begin() + size);
-}
-
-bool read_uint32(const uint8_t *&cur, const uint8_t *end, uint32_t& rez) {
-	if (cur + 4 > end)
-		return false;
-
-	memcpy(&rez, cur, sizeof(uint32_t));
-	cur += 4;
-	return true;
-}
-
-bool read_string(const uint8_t *&cur, const uint8_t *end, std::string &out, size_t size) {
-	if (cur + size > end)
-		return false;
-	
-	out.assign(cur, cur + size);	
-	cur += size;
-	return true;
-}
-
-// end of utility functions
-// (MOVE TO SEPARATE FILE)
 
 bool set_nonblocking(int socket_fd) {
 	int flags = fcntl(socket_fd, F_GETFD, 0);
@@ -95,7 +59,6 @@ std::unique_ptr<Con> handle_accept(int listen_fd) {
 	return con;
 }
 
-// PROBLEM PROBLEM PROBLEM
 ssize_t parse_request(const uint8_t *data, size_t size ,std::vector<std::string> &out) {
 	const uint8_t *end = data + size;
 	uint32_t net_nstr, nstr = 0;
@@ -130,6 +93,7 @@ ssize_t parse_request(const uint8_t *data, size_t size ,std::vector<std::string>
 void handle_write(std::unique_ptr<Con>& con) {
 	assert(con->outgoing.size() > 0); 
 	ssize_t rv = write(con->fd, con->outgoing.data(), con->outgoing.size());
+	fprintf(stderr, "Wrote: %ld bytes\n", rv);
 	if (rv < 0 && (errno == EINTR || errno == EAGAIN)) 
 		return;
 	
@@ -146,7 +110,7 @@ void handle_write(std::unique_ptr<Con>& con) {
 	}
 }
 
-static void do_get(std::vector<std::string> &cmds, response &rep) {
+static void do_get(std::vector<std::string> &cmds, Buffer &buffer) {
 	Entry key;
 	key.key.swap(cmds[1]);
 
@@ -156,7 +120,7 @@ static void do_get(std::vector<std::string> &cmds, response &rep) {
 
 	msg("something after the search");
 	if (!hnode) {
-		rep.status = RESPONSE_NX; // no key found
+		out_nil(buffer);
 		return;
 	}
 
@@ -164,10 +128,10 @@ static void do_get(std::vector<std::string> &cmds, response &rep) {
 	const std::string val = result->val;
 
 	assert(val.size() < k_max_msg);
-	rep.data.assign(val.begin(), val.end());
+	out_str(buffer, val.data(), val.size());
 }
 
-static void do_set(std::vector<std::string>& cmds, response &rep) {
+static void do_set(std::vector<std::string>& cmds, Buffer &out_buffer) {
 	// we have to search for the key
 	// if it exists, we update it
 	// otherwise we add a new entry into the hashmap
@@ -185,16 +149,16 @@ static void do_set(std::vector<std::string>& cmds, response &rep) {
 		new_entry->val.swap(cmds[2]);
 		new_entry->node.hcode = lookup.node.hcode; 
 		hmap_insert(&g_data.db, &new_entry->node);
-		rep.status = RESPONSE_OK;
+		out_nil(out_buffer);
 		return;
 	}
 	
 	Entry *result = container_of(hnode, Entry, node);
 	result->val.swap(cmds[2]);
-	rep.status = RESPONSE_OK;
+	out_nil(out_buffer);
 }
 
-static void do_delete(std::vector<std::string> &cmds, response &rep) {
+static void do_delete(std::vector<std::string> &cmds, Buffer &buffer) {
 	// search the key
 	Entry key;
 	key.key.swap(cmds[1]);
@@ -202,37 +166,50 @@ static void do_delete(std::vector<std::string> &cmds, response &rep) {
 
 	HNode *hnode = hmap_lookup(&g_data.db, &key.node, entry_eq);
 	if (!hnode) {
-		rep.status = RESPONSE_NX;
+		out_nil(buffer);
 		return;
 	}
 
 	Entry *value = container_of(hnode, Entry, node);
-	rep.data.assign(value->val.begin(), value->val.end());
-	rep.status = RESPONSE_OK;
+	out_int(buffer, 1);
 
 	hmap_deletion(&g_data.db, hnode, entry_eq); 
 }
 
-static void do_request(response &rep, std::vector<std::string> &commands) {
+static void do_request(Buffer &buffer, std::vector<std::string> &commands) {
 	if (commands.size() == 2 && commands[0] == "get")	{
 		msg("case get");
-		do_get(commands, rep);
+		do_get(commands, buffer);
 	} else if (commands.size() == 3 && commands[0] == "set") {
 			msg("case set");
-			do_set(commands, rep);
+			do_set(commands, buffer);
 	} else if (commands.size() == 2 && commands[0] == "del") {
 			msg("case del");
-			do_delete(commands, rep);
+			do_delete(commands, buffer);
 	} else {
-		rep.status = RESPONSE_ERR;
+		out_nil(buffer);
 	}
 }
 
-static void make_response(const response& rep, std::vector<uint8_t> &out) {
-	uint32_t net_len = htonl(4 + rep.data.size());
-	buf_append(out, (const uint8_t*) &net_len, sizeof(uint32_t));
-	buf_append(out, (const uint8_t*) &rep.status, sizeof(uint32_t));
-	buf_append(out, rep.data.data(), rep.data.size()); 
+static void response_begin(Buffer &out, size_t *header) {
+	*header = out.size();
+	buf_append_u32(out, 0);
+}
+
+static size_t response_size(const Buffer &out, const size_t header) {
+	return out.size() - header - 4;
+}
+
+static void response_end(Buffer &out, size_t header) {
+	size_t message_size = response_size(out, header);
+	if (message_size > k_max_msg) {
+		out.resize(header + 4);
+		msg("response is too big");
+		message_size = response_size(out, header);
+	}
+	uint32_t len = ntohl((uint32_t) message_size);
+	memcpy(&out[header], &len, 4);
+
 }
 
 static bool try_one_request(std::unique_ptr<Con>& con) {
@@ -264,9 +241,10 @@ static bool try_one_request(std::unique_ptr<Con>& con) {
 		return false;
 	}
 
-	response rep;
-	do_request(rep, commands);
-	make_response(rep, con->outgoing);
+	size_t header_pos = 0;
+	response_begin(con->outgoing, &header_pos); 
+	do_request(con->outgoing, commands);
+	response_end(con->outgoing, header_pos);
 	handle_write(con);
 
 	buf_consume(con->incoming, 4 + length);
@@ -319,7 +297,7 @@ int main() {
 		std::cerr<<std::strerror(errno);
 	}
 	
-	server.sin_port = port;
+	server.sin_port = htons(port);
 	server.sin_family = AF_INET;
 	server.sin_addr.s_addr = INADDR_ANY;
 	
